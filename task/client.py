@@ -19,13 +19,20 @@ class DialClient:
     ):
         #TODO:
         # 1. If not api_key then raise error
+        if not api_key or api_key.strip() == "":
+            raise ValueError("API key cannot be null or empty")
         # 2. Add `self.__endpoint` with formatted `endpoint` with model (model=deployment_name):
         #   - f"{endpoint}/openai/deployments/{deployment_name}/chat/completions"
+        self.__endpoint = f"{endpoint}/openai/deployments/{deployment_name}/chat/completions"
         # 3. Add `self.__api_key`
+        self.__api_key = api_key
         # 4. Prepare tools dict where key will be tool name and value will
+        self.__tools_dict: dict[str, BaseTool] = {tool.name: tool for tool in tools}
         # 5. Prepare tools list with tool schemas
+        self.__tools_schemas: list[str] = [tool.schema for tool in tools]
         # 6. Optional: print endpoint and tools schemas
-        raise NotImplementedError()
+        print(self.__endpoint)
+        print(json.dumps(self.__tools_schemas, indent=4))
 
 
     def get_completion(self, messages: list[Message], print_request: bool = True) -> Message:
@@ -33,14 +40,26 @@ class DialClient:
         # 1. create `headers` dict with:
         #   - "api-key": self._api_key
         #   - "Content-Type": "application/json"
+        headers = {
+            "api-key": self.__api_key,
+            "Content-Type": "application/json"
+        }
         # 2. create `request_data` dict with:
         #   - "messages": [msg.to_dict() for msg in messages]
         #   - "tools": self._tools
+        request_data = {
+            "messages": [msg.to_dict() for msg in messages],
+            "tools": self.__tools_schemas,
+        }
         # 3. Optional: print request (message history)
+        if print_request:
+            print(self.__endpoint)
+            print("REQUEST:", json.dumps({"messages": [msg.to_dict() for msg in messages]}, indent=2))
         # 4. Make POST request (requests) with:
         #   - url=self._endpoint
         #   - headers=headers
         #   - json=request_data
+        response = requests.post(url=self.__endpoint, headers=headers, json=request_data)
         # 5. If response status code is 200:
         #   - get response as json
         #   - get "choices" from response json
@@ -58,7 +77,37 @@ class DialClient:
         #           - make recursive call (return `get_completion` with `messages` and `print_request`)
         #       No: return `ai_response` (final assistant response)
         # Otherwise raise exception
-        raise NotImplementedError()
+        if response.status_code == 200:
+            data = response.json()
+            choices = data.get("choices", [])
+            if choices:
+                choice = choices[0]
+                print("RESPONSE:", json.dumps(choice, indent=2))
+                print("-" * 100)
+
+                message_data = choice.get("message", {})
+                content = message_data.get("content")
+                tool_calls = message_data.get("tool_calls")
+
+                ai_response = Message(
+                    role=Role.AI,
+                    content=content,
+                    tool_calls=tool_calls
+                )
+
+                if choice.get("finish_reason") == "tool_calls":
+                    messages.append(ai_response)
+
+                    tool_messages = self._process_tool_calls(tool_calls)
+                    messages.extend(tool_messages)
+
+                    # Recursive call to get final response
+                    return self.get_completion(messages, print_request)
+
+                return ai_response
+            raise ValueError("No Choice has been present in the response")
+        else:
+            raise Exception(f"HTTP {response.status_code}: {response.text}")
 
 
     def _process_tool_calls(self, tool_calls: list[dict[str, Any]]) -> list[Message]:
@@ -83,11 +132,33 @@ class DialClient:
             #      between Assistant message `tool_calls[i][id]` and message in history.
             #      In case if no Tool message presented in history (no message at all or with different tool_call_id),
             #      then LLM with answer with Error (that not find tool message with specified id).
-            raise NotImplementedError()
+            tool_messages = []
+            for tool_call in tool_calls:
+                tool_call_id = tool_call["id"]
+                function = tool_call["function"]
+                function_name = function["name"]
+                arguments = json.loads(function["arguments"])
+
+                tool_execution_result = self._call_tool(function_name, arguments)
+
+                tool_messages.append(Message(
+                    role=Role.TOOL,
+                    name=function_name,
+                    tool_call_id=tool_call_id,
+                    content=tool_execution_result
+                ))
+
+                print(f"FUNCTION '{function_name}'\n{tool_execution_result}\n{'-' * 50}")
+
+            return tool_messages
 
         return tool_messages
 
     def _call_tool(self, function_name: str, arguments: dict[str, Any]) -> str:
         #TODO:
         # Get tool from `__tools_dict`, id present then return executed result, otherwise return `f"Unknown function: {function_name}"`
-        raise NotImplementedError()
+        tool = self.__tools_dict.get(function_name)
+        if tool:
+            return tool.execute(arguments)
+
+        return f"Unknown function: {function_name}"
